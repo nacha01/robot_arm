@@ -1,1 +1,776 @@
+/* elbow값이 변화가 없다.=====
+  HE BLE 모듈용 로봇팔 최종 코드
 
+  통신 구조
+  Flutter
+    ↓ BLE
+  HE 모듈
+    ↓ UART
+  Arduino 0번(RX) / 1번(TX)
+    ↓
+  Servo
+
+  수신 명령 형식
+  ------------------------------------------------
+
+  자동 이동
+  White#
+  Orange#
+  None#
+
+  직접 이동
+  GoBall#
+  GoIni#
+  GoWhite#
+  GoOrange#
+
+  위치값 저장
+  Ball:115,0,90#
+  White:140,60,10#
+  Orange:140,60,180#
+
+  속도 설정
+  ;9#
+
+  미세 조정
+  B1#
+  B-1#
+  S1#
+  S-1#
+  E1#
+  E-1#
+
+  조이스틱
+  0+1#
+  0-1#
+  1+0#
+
+  모든 명령은 #으로 끝남
+
+  주의
+  ------------------------------------------------
+  Arduino 0번/1번은 USB 업로드와 공유됨.
+  업로드할 때는 HE 모듈 4핀 커넥터를 분리하는 것이 안전함.
+*/
+
+#include <Servo.h>
+
+// ============================================================
+// UART 설정
+// ============================================================
+
+// HE 모듈 UART 통신 속도
+const long BLE_BAUD = 9600;
+
+// ============================================================
+// 수신 버퍼
+// ============================================================
+
+String receiveBuffer = "";
+String received = "";
+
+// ============================================================
+// Servo 설정
+// ============================================================
+
+Servo motor[4];
+
+// 기존 로봇팔 핀
+// 맨 위 모터부터 4,5,6,7
+const int servoPin[4] = {
+  4, 5, 6, 7
+};
+
+// 초기 각도
+//
+// motor[0] = 집게
+// motor[1] = Base
+// motor[2] = Shoulder
+// motor[3] = Elbow
+//
+// 일직선 정렬 기준은 90도
+int motor_angle[4] = {
+  93,
+  90,
+  90,
+  90
+};
+
+// 조이스틱 상태
+int motor_state[4] = {
+  0,
+  0,
+  0,
+  0
+};
+
+// 각 모터의 최소/최대 각도
+int limitAngle[4][2] = {
+  {90, 180},   // 집게
+  {0, 180},    // Base
+  {0, 180},    // Shoulder
+  {0, 180}     // Elbow
+};
+
+// 이동 속도
+int moveSpeed = 9;
+
+// ============================================================
+// 저장 위치
+// ============================================================
+
+// Base / Shoulder / Elbow 대응은
+// 기존 앱/코드 배열 순서를 그대로 유지
+int ini_pos[3] = {
+  90,
+  90,
+  90
+};
+
+int ball_pos[3] = {
+  115,
+  0,
+  90
+};
+
+int whi_pos[3] = {
+  140,
+  60,
+  10
+};
+
+int org_pos[3] = {
+  140,
+  60,
+  180
+};
+
+// ============================================================
+// 각도 범위 제한
+// ============================================================
+
+int val(int motorIndex, int angle) {
+
+  if (angle < limitAngle[motorIndex][0]) {
+    return limitAngle[motorIndex][0];
+  }
+
+  if (angle > limitAngle[motorIndex][1]) {
+    return limitAngle[motorIndex][1];
+  }
+
+  return angle;
+}
+
+// ============================================================
+// 현재 위치와 목표 위치 비교
+// ============================================================
+
+bool isarrsame(int arr[]) {
+
+  for (int i = 0; i < 3; i++) {
+
+    if (motor_angle[i + 1] != arr[i]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// ============================================================
+// 모든 서보에 현재 각도 적용
+// ============================================================
+
+void motor_write() {
+
+  for (int i = 0; i < 4; i++) {
+    motor[i].write(motor_angle[i]);
+  }
+}
+
+// ============================================================
+// 목표 위치로 천천히 이동
+// ============================================================
+
+void pos_move(int end_pos[]) {
+
+  while (!isarrsame(end_pos)) {
+
+    for (int i = 0; i < 3; i++) {
+
+      if (motor_angle[i + 1] < end_pos[i]) {
+        motor_angle[i + 1]++;
+      }
+      else if (motor_angle[i + 1] > end_pos[i]) {
+        motor_angle[i + 1]--;
+      }
+    }
+
+    motor_write();
+
+    delay(moveSpeed);
+  }
+}
+
+// ============================================================
+// 집게 제어
+//
+// -1 : 벌리기
+//  1 : 집기
+// ============================================================
+
+void crab(int direction) {
+
+  int target =
+      (direction == 1)
+      ? limitAngle[0][1]
+      : limitAngle[0][0];
+
+  while (motor_angle[0] != target) {
+
+    motor_angle[0] += direction;
+
+    motor_angle[0] =
+        val(
+          0,
+          motor_angle[0]
+        );
+
+    motor[0].write(
+      motor_angle[0]
+    );
+
+    delay(
+      (int)(moveSpeed * 1.3)
+    );
+  }
+}
+
+// ============================================================
+// 색깔별 자동 이동
+// ============================================================
+
+void color_move(String color) {
+
+  if (color == "None") {
+    return;
+  }
+
+  // 집게 벌리기
+  crab(-1);
+
+  // 초기 위치
+  pos_move(ini_pos);
+
+  // 공 위치
+  pos_move(ball_pos);
+
+  // 공 집기
+  crab(1);
+
+  delay(300);
+
+  // 초기 위치로 복귀
+  pos_move(ini_pos);
+
+  delay(100);
+
+  // 색상별 목표 위치
+  int* target = NULL;
+
+  if (color == "White") {
+    target = whi_pos;
+  }
+  else if (color == "Orange") {
+    target = org_pos;
+  }
+
+  if (target == NULL) {
+    return;
+  }
+
+  // 목표 위치 이동
+  pos_move(target);
+
+  // 공 놓기
+  crab(-1);
+
+  delay(300);
+
+  // 초기 위치 복귀
+  pos_move(ini_pos);
+
+  // 집게 닫기
+  crab(1);
+}
+
+// ============================================================
+// 조이스틱 모드
+// ============================================================
+
+void joystick(String str) {
+
+  if (str.length() < 2) {
+    return;
+  }
+
+  int index =
+      str.substring(0, 1).toInt();
+
+  if (index < 0 || index >= 4) {
+    return;
+  }
+
+  int state =
+      str.substring(1).toInt();
+
+  motor_state[index] = state;
+
+  for (int i = 0; i < 4; i++) {
+
+    motor_angle[i] =
+        val(
+          i,
+          motor_angle[i] + motor_state[i]
+        );
+  }
+
+  motor_write();
+
+  delay(moveSpeed);
+}
+
+// ============================================================
+// 현재 각도 전송
+// ============================================================
+
+void send_angle() {
+
+  String temp = "";
+
+  for (int i = 0; i < 4; i++) {
+
+    temp += String(motor_angle[i]);
+
+    if (i < 3) {
+      temp += ",";
+    }
+  }
+
+  Serial.println(temp);
+}
+
+// ============================================================
+// 속도 설정
+// ============================================================
+
+void set_speed(String command) {
+
+  String temp =
+      command.substring(1);
+
+  int newSpeed =
+      temp.toInt();
+
+  if (newSpeed < 1) {
+    newSpeed = 1;
+  }
+
+  if (newSpeed > 100) {
+    newSpeed = 100;
+  }
+
+  moveSpeed = newSpeed;
+
+  Serial.print("speed saved: ");
+  Serial.println(moveSpeed);
+}
+
+// ============================================================
+// 위치값 저장
+// ============================================================
+
+void angle_set(String command) {
+
+  int colon =
+      command.indexOf(":");
+
+  if (colon == -1) {
+    Serial.println("invalid angle command");
+    return;
+  }
+
+  String name =
+      command.substring(
+        0,
+        colon
+      );
+
+  int comma1 =
+      command.indexOf(
+        ",",
+        colon + 1
+      );
+
+  int comma2 =
+      command.indexOf(
+        ",",
+        comma1 + 1
+      );
+
+  if (
+    comma1 == -1 ||
+    comma2 == -1
+  ) {
+    Serial.println("invalid angle format");
+    return;
+  }
+
+  String a1 =
+      command.substring(
+        colon + 1,
+        comma1
+      );
+
+  String a2 =
+      command.substring(
+        comma1 + 1,
+        comma2
+      );
+
+  String a3 =
+      command.substring(
+        comma2 + 1
+      );
+
+  int* target = NULL;
+
+  if (name == "Ball") {
+    target = ball_pos;
+  }
+  else if (name == "White") {
+    target = whi_pos;
+  }
+  else if (name == "Orange") {
+    target = org_pos;
+  }
+
+  if (target == NULL) {
+
+    Serial.println(
+      "unknown position name"
+    );
+
+    return;
+  }
+
+  target[0] =
+      val(
+        1,
+        a1.toInt()
+      );
+
+  target[1] =
+      val(
+        2,
+        a2.toInt()
+      );
+
+  target[2] =
+      val(
+        3,
+        a3.toInt()
+      );
+
+  Serial.print(name);
+  Serial.println(" angle saved");
+}
+
+// ============================================================
+// 조그 이동
+// ============================================================
+
+void jog_axis(String command) {
+
+  if (command.length() < 2) {
+    return;
+  }
+
+  char axis =
+      command.charAt(0);
+
+  int amount =
+      command.substring(1).toInt();
+
+  int motorIndex = -1;
+
+  if (axis == 'B') {
+    motorIndex = 1;
+  }
+  else if (axis == 'S') {
+    motorIndex = 2;
+  }
+  else if (axis == 'E') {
+    motorIndex = 3;
+  }
+
+  if (motorIndex == -1) {
+
+    Serial.println(
+      "unknown axis"
+    );
+
+    return;
+  }
+
+  motor_angle[motorIndex] =
+      val(
+        motorIndex,
+        motor_angle[motorIndex] + amount
+      );
+
+  motor_write();
+
+  Serial.print("jog = ");
+  Serial.println(command);
+
+  send_angle();
+}
+
+// ============================================================
+// Serial 수신
+//
+// #을 만나면 한 명령 완료
+// ============================================================
+
+void receiveCommand() {
+
+  while (Serial.available() > 0) {
+
+    char c =
+        Serial.read();
+
+    // 명령 종료
+    if (c == '#') {
+
+      receiveBuffer.trim();
+
+      received =
+          receiveBuffer;
+
+      receiveBuffer = "";
+
+      return;
+    }
+
+    // CR/LF는 무시
+    if (
+      c == '\r' ||
+      c == '\n'
+    ) {
+      continue;
+    }
+
+    receiveBuffer += c;
+
+    // 비정상적으로 긴 데이터 방지
+    if (receiveBuffer.length() > 100) {
+
+      receiveBuffer = "";
+
+      Serial.println(
+        "receive buffer reset"
+      );
+
+      return;
+    }
+  }
+}
+
+// ============================================================
+// 명령 실행
+// ============================================================
+
+void processCommand() {
+
+  if (received == "") {
+    return;
+  }
+
+  String command =
+      received;
+
+  received = "";
+
+  // ------------------------------------------------------------
+  // 자동 색 분류
+  // ------------------------------------------------------------
+
+  if (command == "White") {
+
+    color_move("White");
+
+    Serial.println(
+      "White move done"
+    );
+  }
+
+  else if (
+    command == "Orange"
+  ) {
+
+    color_move("Orange");
+
+    Serial.println(
+      "Orange move done"
+    );
+  }
+
+  else if (
+    command == "None"
+  ) {
+
+    Serial.println(
+      "None"
+    );
+  }
+
+  // ------------------------------------------------------------
+  // 직접 위치 이동
+  // ------------------------------------------------------------
+
+  else if (
+    command == "GoBall"
+  ) {
+
+    pos_move(ball_pos);
+
+    send_angle();
+  }
+
+  else if (
+    command == "GoIni"
+  ) {
+
+    pos_move(ini_pos);
+
+    send_angle();
+  }
+
+  else if (
+    command == "GoWhite"
+  ) {
+
+    pos_move(whi_pos);
+
+    send_angle();
+  }
+
+  else if (
+    command == "GoOrange"
+  ) {
+
+    pos_move(org_pos);
+
+    send_angle();
+  }
+
+  // ------------------------------------------------------------
+  // 위치값 저장
+  // ------------------------------------------------------------
+
+  else if (
+    command.indexOf(":") != -1
+  ) {
+
+    angle_set(command);
+  }
+
+  // ------------------------------------------------------------
+  // 속도
+  // ------------------------------------------------------------
+
+  else if (
+    command.startsWith(";")
+  ) {
+
+    set_speed(command);
+  }
+
+  // ------------------------------------------------------------
+  // 조그
+  // ------------------------------------------------------------
+
+  else if (
+    command.startsWith("B") ||
+    command.startsWith("S") ||
+    command.startsWith("E")
+  ) {
+
+    jog_axis(command);
+  }
+
+  // ------------------------------------------------------------
+  // 조이스틱
+  // ------------------------------------------------------------
+
+  else if (
+    command.startsWith("0") ||
+    command.startsWith("1") ||
+    command.startsWith("2") ||
+    command.startsWith("3")
+  ) {
+
+    joystick(command);
+  }
+
+  else {
+
+    Serial.print(
+      "unknown command: "
+    );
+
+    Serial.println(
+      command
+    );
+  }
+}
+
+// ============================================================
+// setup
+// ============================================================
+
+void setup() {
+
+  Serial.begin(BLE_BAUD);
+
+  // Servo 초기화
+  for (int i = 0; i < 4; i++) {
+
+    motor[i].attach(
+      servoPin[i]
+    );
+
+    motor[i].write(
+      motor_angle[i]
+    );
+  }
+
+  delay(500);
+
+  Serial.println(
+    "HE Robot Arm Ready"
+  );
+}
+
+// ============================================================
+// loop
+// ============================================================
+
+void loop() {
+
+  receiveCommand();
+
+  processCommand();
+}
